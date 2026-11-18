@@ -1,0 +1,55 @@
+# 小静 · 带路工作台
+
+机器人端独立目录：`/home/nvidia/guide_robot/learn/visitor_wayfinding_robot/web`。监测进程与 learn3_d 带路节点、相机及底盘进程相互独立；不改动这些程序、配置或启动项。
+
+## 启动
+
+```bash
+cd /home/nvidia/guide_robot/learn/visitor_wayfinding_robot/web
+bash start_monitor.sh --port 8765
+```
+
+浏览器访问 `http://192.168.21.19:8765/`。只需机器人上已有的 Python、psutil、PyYAML、OpenCV、NumPy 和 ROS 2 Jazzy。
+
+## 页面
+
+- 总览：摄像头画面、运行示意图、当前导航任务、启动节点、快捷指令下发、日志。
+- 设备状态：CPU / 温度 / 内存 / 电量、ROS 图、相机、麦克风、底盘、TTS。
+- 地图配置：运行示意图 + 实时位姿；地点列表来自 `src/learn3_d/config/places.yaml`，只展示不修改。
+
+## 运行示意图
+
+- 不再依赖实景地图：页面用 SVG 画一条示意主线，5 个站点按 `places.yaml` 的顺序排列，不要求与实际几何一致。
+- 机器人位置取底盘 `GET /api/core/navigation/v1/pose` 的 `x/y`，投影到主线上得到沿线进度，绿色胶囊标记大致位置，超过 5 秒无数据会变暗。
+- 站点坐标由 `GET /api/core/navigation/v1/poi` 读取，和 `tour_chat` 节点使用同一套点位；改点位后无需改页面。
+- 任务运行时浮层显示进度百分比与「前往 某站点」；待命时显示最近站点。示意图同时出现在总览摄像头下方和地图配置页。
+
+## 控制边界
+
+只开放三个需要显式确认的动作，请求体必须带 `{"confirm": true}`：
+
+- `POST /api/node/start`：执行 `ros2 launch learn3_d tour.launch.py` 启动带路节点，日志写入 `/tmp/learn3d-tour-web.log`。
+- `POST /api/node/stop`：只停止由本页启动的节点；外部启动的节点需在终端停止。
+- `POST /api/navigate`：仅接受 `places.yaml` 中的地点，向 `/tour/chat` 发送「去某地点」，由 `tour_chat` 执行导航。
+- `POST /api/command`：把输入框里的任意文本（≤200 字）原样发到 `/tour/chat`，用于问时间、闲聊等非导航指令。
+
+其余写方法（PUT / PATCH / DELETE）返回 405，未知路径返回 404，不提供任意文件读取或命令执行。页面不会直接调用底盘 SDK。
+
+## 实际数据
+
+- CPU、CPU 温度、内存、开机时长：读取主机，约 2 秒刷新。
+- ROS 节点、话题与 TTS 服务是否可发现：约 5 秒刷新，不调用服务。
+- 当前任务：解析 `tour_chat` 的导航日志（开始、路线、到达、失败），不额外发布状态话题。
+- 电源：每 5 秒只读查询底盘 `GET http://192.168.11.10:9090/api/core/system/v1/battery/pack`，读取电量与明确的 `isCharging` 标志，不根据电流正负推断充电状态。
+- 彩色／深度图：只订阅已存在的头部相机话题，网页约 3 帧/秒、宽度最多 768 像素，不录像、不落盘。
+- 麦克风：只记录现有音频消息的接收时间，不保存或发送音频内容。
+
+传感器、主机和 ROS 图分别显示新鲜度；断开时不继续显示为在线。
+
+## 校验
+
+```bash
+python3 -m unittest test_monitor -v
+```
+
+测试不启动 ROS 或机器人服务，检查确认标记、地点白名单、节点未运行时拒绝导航、写方法拒绝、私有文件拒绝、旧图像不可访问与凭据遮盖。
