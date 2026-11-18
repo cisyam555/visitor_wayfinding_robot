@@ -38,7 +38,7 @@ from collections import deque
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
-from interaction_msgs.srv import TtsService
+from interaction_msgs.srv import InstructionService, TtsService
 from lyre_msgs.msg import AsrIat, AsrKeyword
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
@@ -74,14 +74,42 @@ class Speech:
     """
 
     def __init__(self, node, service, audio_id=DEFAULT_AUDIO_ID,
-                 enabled=True):
+                 enabled=True, voice_id="", voice_default=""):
         self._node = node
         self._log = node.get_logger()
         self._audio_id = audio_id
         self._enabled = enabled
         self._client = (node.create_client(TtsService, service)
                         if enabled else None)
+        self._voice_id = (voice_id or "").strip()
+        self._voice_default = (voice_default or "").strip()
+        self._voice_client = (
+            node.create_client(
+                InstructionService,
+                "/intelligent_interaction/tts/update_voice_id")
+            if enabled and self._voice_id else None)
         self.busy = False
+
+    def _set_voice(self, voice):
+        """切换全局音色。播报前切女声，播完切回默认，避免影响别的项目。"""
+        if not self._voice_client or not voice:
+            return
+        if not self._voice_client.wait_for_service(timeout_sec=1.0):
+            self._log.warn("音色服务未就绪，沿用当前音色")
+            return
+        request = InstructionService.Request()
+        request.cmd = voice
+        done = threading.Event()
+        future = self._voice_client.call_async(request)
+        future.add_done_callback(lambda _: done.set())
+        if not done.wait(2.0):
+            self._log.warn(f"切换音色 {voice} 超时")
+            return
+        try:
+            if not future.result().success:
+                self._log.warn(f"切换音色 {voice} 被拒绝")
+        except Exception as exc:  # noqa: BLE001
+            self._log.warn(f"切换音色 {voice} 异常：{exc}")
 
     def say(self, text):
         text = (text or "").strip()
@@ -93,6 +121,7 @@ class Speech:
         self._log.info(f"播报：{text}")
         self.busy = True
         try:
+            self._set_voice(self._voice_id)
             response = self._call("append", text=text)
             if response is None or not response.success:
                 self._log.warn(f"播报下发失败：{response}")
@@ -100,7 +129,15 @@ class Speech:
             self._wait_playback(text)
             return True
         finally:
+            self._set_voice(self._voice_default)
             self.busy = False
+
+    def stop_async(self):
+        """打断当前播报。必须放到独立线程里发，避免卡住 executor。"""
+        if not self._enabled:
+            return
+        threading.Thread(target=self._call, args=("stop",),
+                         daemon=True).start()
 
     def _call(self, cmd, text=""):
         request = TtsService.Request()
@@ -254,6 +291,9 @@ class TourChat(Node):
             "创想谷、厕所、跆拳道馆。")
         self.declare_parameter("tts_service", "/intelligent_interaction/tts/play")
         self.declare_parameter("audio_id", DEFAULT_AUDIO_ID)
+        # 本项目的专属音色：报播时切过去，播完恢复平台默认，避免影响别的项目
+        self.declare_parameter("voice_id", "tiangong_v4")
+        self.declare_parameter("voice_default", "tiangong_v2")
         self.declare_parameter("enable_voice", True)
         self.declare_parameter("enable_greet", False)
         self.declare_parameter("greet_text", DEFAULT_GREET)
@@ -365,6 +405,8 @@ class TourChat(Node):
             str(self.get_parameter("tts_service").value),
             audio_id=str(self.get_parameter("audio_id").value),
             enabled=bool(self.get_parameter("enable_voice").value),
+            voice_id=str(self.get_parameter("voice_id").value),
+            voice_default=str(self.get_parameter("voice_default").value),
         )
 
         # 本地麦克风识别：连续收音，不需要先喊唤醒词
@@ -573,6 +615,9 @@ class TourChat(Node):
         if self._navigating:
             action = self._interrupt(text)
             if action in ("retarget", "stop", "pause", "handled"):
+                if self._speech.busy:
+                    # 观众在播报中下指令：立刻掐掉当前这句，别让他等
+                    self._speech.stop_async()
                 return
             if action is not None:  # replay_*：停下后还要接着处理这句话
                 self._queue.put(text)
@@ -594,7 +639,8 @@ class TourChat(Node):
                 self.get_logger().info(f"忙（播报）中忽略：{text}")
                 self._file_log("忽略(忙)", text)
                 return
-            self.get_logger().info(f"播报中收到指令：{text}")
+            self.get_logger().info(f"播报中收到指令，打断播报：{text}")
+            self._speech.stop_async()
         key = re.sub(r"\s+", "", text)
         now = time.monotonic()
         if key == self._last_key and now - self._last_at < self._dedupe_window:
@@ -1125,7 +1171,7 @@ class TourChat(Node):
             except queue.Empty:
                 return
 
-    def _say(self, text: str, listen: bool = False) -> bool:
+    def _say(self, text: str, listen: bool = True) -> bool:
         """唯一的播报出口：记录话术与静默窗口，返回是否播报成功。
 
         listen=True 时播报期间不关麦克风，让观众可以直接打断
@@ -1164,7 +1210,7 @@ class TourChat(Node):
             return _echo_of(text, self._last_spoken)
         return False
 
-    def _speak(self, text: str, listen: bool = False) -> None:
+    def _speak(self, text: str, listen: bool = True) -> None:
         self._say(text, listen=listen)
 
     def _speak_async(self, text: str) -> None:
