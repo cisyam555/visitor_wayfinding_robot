@@ -330,8 +330,7 @@ class TourChat(Node):
         self.declare_parameter("obstacle_home_resume_text", "障碍物已移除，我继续回家")
         self.declare_parameter("front_guard_enabled", True)
         self.declare_parameter("front_guard_distance", 0.5)
-        self.declare_parameter("front_guard_retries", 3)
-        self.declare_parameter("front_guard_wait", 60.0)
+        self.declare_parameter("obstacle_repeat", 15.0)
         self.declare_parameter("places_file", "")
         self.declare_parameter("log_file", "")
 
@@ -382,10 +381,8 @@ class TourChat(Node):
         self._obstacle_home_resume_text = str(
             self.get_parameter("obstacle_home_resume_text").value
             or "障碍物已移除，我继续回家")
-        self._front_guard_retries = max(
-            1, int(self.get_parameter("front_guard_retries").value))
-        self._front_guard_wait = max(
-            5.0, float(self.get_parameter("front_guard_wait").value))
+        self._obstacle_repeat = max(
+            5.0, float(self.get_parameter("obstacle_repeat").value))
         self._here = ""            # 当前所在点位，供闲聊注入
         self._llm_down_until = 0.0  # 模型刚失败过就短暂停用，避免连等两次超时
         self._last_spoken = ""
@@ -978,49 +975,40 @@ class TourChat(Node):
 
         防撞距离 0.5 米，正常避障交给底盘；真的被挡死（人站在车前）时
         立刻播报让行话术，等障碍移开后续行并播报续行话术。
-        连续让行 front_guard_retries 次后不再反复喊话，但**不会放弃目标点**，
-        会一直安静等到路通再继续，避免被挡几次就自动回待命。
+        **不会放弃目标点**，也不会因为被挡次数多就不说话：每被挡一次都喊，
+        一直不走就每隔 obstacle_repeat_s 秒再喊一次，直到路通继续。
         """
-        tries = self._front_guard_retries
         yield_text = self._obstacle_home_text if standby else self._obstacle_text
         resume_text = (self._obstacle_home_resume_text if standby
                        else self._obstacle_resume_text)
-        yields = 0
-        last_block_at = None
+        repeat_s = self._obstacle_repeat
+        blocks = 0
         while True:
             result = self._nav.goto(poi)
             if self._nav.was_cancelled():
                 return "cancelled"
             if result != "blocked":
                 return result
-            now = time.monotonic()
-            # 隔了很久才遇到的新障碍重新计次，避免整趟都不再提醒
-            if last_block_at is None or now - last_block_at > 30.0:
-                yields = 0
-            last_block_at = now
-            yields += 1
-            if yields <= tries:
-                # 绕不过去：立刻播报，和 learn1_D 的 on_blocked 一致
-                self.get_logger().info(
-                    f"前方被挡，第 {yields}/{tries} 次让行，播报：{yield_text}")
-                self._file_log(
-                    "障碍", f"{poi} 第 {yields} 次被挡，播报：{yield_text}")
-                self._speak(yield_text, listen=True)
-                if self._nav.was_cancelled():
-                    return "cancelled"
-            else:
-                # 已经喊过多次，不再扰民；目标保留，继续等
-                self.get_logger().info(
-                    f"前方仍被挡，已让行 {yields} 次，保留目标 {poi} 安静等待")
-                self._file_log("障碍", f"{poi} 第 {yields} 次被挡，安静等待")
-            # 一直等到路通；中途允许观众改道/叫停
+            blocks += 1
+            # 绕不过去：立刻播报，和 learn1_D 的 on_blocked 一致
+            self.get_logger().info(
+                f"前方被挡，第 {blocks} 次让行，播报：{yield_text}")
+            self._file_log("障碍", f"{poi} 第 {blocks} 次被挡，播报：{yield_text}")
+            self._speak(yield_text, listen=True)
+            if self._nav.was_cancelled():
+                return "cancelled"
+            # 一直等到路通；人不走就每隔 repeat_s 再喊一次
+            last_nag = time.monotonic()
             while True:
-                if self._wait_front_clear(self._front_guard_wait):
+                if self._wait_front_clear(min(5.0, repeat_s)):
                     break
                 if self._nav.was_cancelled():
                     return "cancelled"
-                self.get_logger().warn(f"{poi} 仍被挡，继续等待让行")
-                self._file_log("障碍", f"{poi} 继续等待让行")
+                if time.monotonic() - last_nag >= repeat_s:
+                    self.get_logger().info(f"{poi} 仍被挡，再次提醒让行")
+                    self._file_log("障碍", f"{poi} 仍被挡，再次提醒让行")
+                    self._speak_async(yield_text)
+                    last_nag = time.monotonic()
             self.get_logger().info(f"前方已让开，重新前往 {poi}")
             self._file_log("障碍", f"{poi} 已让开，继续")
             # 续行播报放后台，不耽误底盘立刻走
