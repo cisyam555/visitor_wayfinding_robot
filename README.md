@@ -14,11 +14,20 @@ https://github.com/user-attachments/assets/1db069cb-c379-418b-94f1-81ea591590b7
 
 ## 网页预览
 
+**[打开实时工作台（机器人局域网）](http://192.168.21.19:8765/)** · [查看启动与使用说明](web/README.md)
+
+实时工作台运行在机器人上。请先启动下方监测服务，并让电脑与机器人连接同一局域网；机器人 IP 变化后需替换链接中的地址。GitHub 上展示的是项目说明、视频和截图，不会运行机器人监测服务。
+
+```bash
+cd /home/nvidia/guide_robot/learn/visitor_wayfinding_robot
+bash web/start_monitor.sh --port 8765
+```
+
 机器人连接状态下的实际网页截图，展示头部相机画面、电池与主机数据。截图是当时状态的记录，不代表当前导航状态。
 
 ![小静带路工作台](docs/images/web-dashboard.jpg)
 
-网页提供设备监测、相机画面、运行示意图与指令入口，详见 [Web 工作台说明](web/README.md)。
+网页提供设备监测、相机画面、运行示意图与指令入口，启动命令及操作说明见 [工作台使用文档](web/README.md)。
 
 ## 功能与交互流程
 

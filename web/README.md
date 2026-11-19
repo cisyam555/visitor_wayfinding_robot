@@ -1,4 +1,8 @@
-# 小静 · 带路工作台
+# 小静 · 带路工作台使用说明
+
+**[打开实时工作台（机器人局域网）](http://192.168.21.19:8765/)** · [返回项目首页与演示视频](../README.md)
+
+当前页面是使用文档。实际的监控与操作界面需要在机器人上启动服务，再通过上方链接访问。电脑和机器人须处于可互通的局域网，IP 变化后请使用机器人当前地址。
 
 机器人端独立目录：`/home/nvidia/guide_robot/learn/visitor_wayfinding_robot/web`。监测进程与 learn3_d 带路节点、相机及底盘进程相互独立；不改动这些程序、配置或启动项。
 
@@ -9,7 +13,14 @@ cd /home/nvidia/guide_robot/learn/visitor_wayfinding_robot/web
 bash start_monitor.sh --port 8765
 ```
 
-浏览器访问 `http://192.168.21.19:8765/`。只需机器人上已有的 Python、psutil、PyYAML、OpenCV、NumPy 和 ROS 2 Jazzy。
+浏览器访问 [http://192.168.21.19:8765/](http://192.168.21.19:8765/)。只需机器人上已有的 Python、psutil、PyYAML、OpenCV、NumPy 和 ROS 2 Jazzy。
+
+## 打不开时检查
+
+- 显示 GitHub 的文字页面：打开的是使用文档，点击顶部“打开实时工作台”。
+- 提示连接被拒绝：确认上述监测服务正在机器人终端运行，且端口为 `8765`。
+- 提示无法到达或连接超时：确认机器人开机、IP 正确，电脑与机器人网络互通。
+- 页面很窄：拉宽浏览器侧栏或在独立浏览器窗口打开。
 
 ## 页面
 
@@ -26,7 +37,7 @@ bash start_monitor.sh --port 8765
 
 ## 控制边界
 
-只开放三个需要显式确认的动作，请求体必须带 `{"confirm": true}`：
+只开放以下需要显式确认的动作，请求体必须带 `{"confirm": true}`：
 
 - `POST /api/node/start`：执行 `ros2 launch learn3_d tour.launch.py` 启动带路节点，日志写入 `/tmp/learn3d-tour-web.log`。
 - `POST /api/node/stop`：只停止由本页启动的节点；外部启动的节点需在终端停止。
