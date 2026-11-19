@@ -83,6 +83,7 @@ class Speech:
                         if enabled else None)
         self._voice_id = (voice_id or "").strip()
         self._voice_default = (voice_default or "").strip()
+        self._voice_retry_at = 0.0
         self._voice_client = (
             node.create_client(
                 InstructionService,
@@ -94,8 +95,12 @@ class Speech:
         """切换全局音色。播报前切女声，播完切回默认，避免影响别的项目。"""
         if not self._voice_client or not voice:
             return
+        # 音色服务不可用时跳过一段时间，避免每句话都白等
+        if time.monotonic() < self._voice_retry_at:
+            return
         if not self._voice_client.wait_for_service(timeout_sec=1.0):
-            self._log.warn("音色服务未就绪，沿用当前音色")
+            self._voice_retry_at = time.monotonic() + 60.0
+            self._log.warn("音色服务未就绪，60 秒内不再尝试切换")
             return
         request = InstructionService.Request()
         request.cmd = voice
@@ -103,12 +108,15 @@ class Speech:
         future = self._voice_client.call_async(request)
         future.add_done_callback(lambda _: done.set())
         if not done.wait(2.0):
-            self._log.warn(f"切换音色 {voice} 超时")
+            self._voice_retry_at = time.monotonic() + 60.0
+            self._log.warn(f"切换音色 {voice} 超时，60 秒内不再尝试")
             return
         try:
             if not future.result().success:
-                self._log.warn(f"切换音色 {voice} 被拒绝")
+                self._voice_retry_at = time.monotonic() + 60.0
+                self._log.warn(f"切换音色 {voice} 被拒绝，60 秒内不再尝试")
         except Exception as exc:  # noqa: BLE001
+            self._voice_retry_at = time.monotonic() + 60.0
             self._log.warn(f"切换音色 {voice} 异常：{exc}")
 
     def say(self, text):
