@@ -17,6 +17,7 @@ import time
 from collections import deque
 
 import numpy as np
+import rclpy
 
 from lyre_msgs.msg import AudioFrame
 from lyre_msgs.srv import AudioControl
@@ -89,6 +90,7 @@ class MicAsr:
         self._muted = threading.Event()
         self._model = None
         self._model_failed = False
+        self._stream_logged = False
 
         self._subscription = node.create_subscription(
             AudioFrame, mic_topic, self._on_frame, 100)
@@ -123,7 +125,17 @@ class MicAsr:
     # ------------------------------------------------------------------ 音频入口
     def _on_frame(self, msg: AudioFrame) -> None:
         try:
-            self._frames.put_nowait(np.frombuffer(bytes(msg.data), dtype=np.int16))
+            data = np.frombuffer(bytes(msg.data), dtype=np.int16)
+            channels = int(getattr(msg, "channels", 1) or 1)
+            if channels > 1 and data.size >= channels:
+                # 多声道交错数据按均值下混，否则会被当成乱序单声道
+                data = data.reshape(-1, channels).mean(axis=1).astype(np.int16)
+            if not self._stream_logged:
+                self._stream_logged = True
+                self._log.info(
+                    f"音频流：消息 {msg.sample_rate}Hz {channels}声道 "
+                    f"{msg.bits_per_sample}bit，按 {self._rate_in}Hz 处理")
+            self._frames.put_nowait(data)
         except queue.Full:
             pass
 
@@ -227,11 +239,20 @@ class MicAsr:
                 return
         started = time.monotonic()
         try:
+            # 能量 VAD 只能切出「有声音」的段，电机声、远处人声、喇叭尾音
+            # 也会进来，Whisper 会把这些噪声编成「可以啊」「请用一下」之类的
+            # 短句。再用内置 Silero VAD 过一遍，只把真正的人声交给模型。
             segments, _ = self._model.transcribe(
                 audio.astype(np.float32) / 32768.0,
                 language=self._language,
                 beam_size=self._beam_size,
-                vad_filter=False,
+                vad_filter=True,
+                vad_parameters={
+                    "threshold": 0.5,
+                    "min_speech_duration_ms": 200,
+                    "min_silence_duration_ms": 400,
+                    "speech_pad_ms": 200,
+                },
                 condition_on_previous_text=False,
                 no_speech_threshold=_NO_SPEECH_PROB,
                 log_prob_threshold=_MIN_AVG_LOGPROB,
@@ -239,14 +260,16 @@ class MicAsr:
                 initial_prompt=self._initial_prompt or None,
             )
             # 分段级再过滤一次：静音/噪声段多半 no_speech_prob 很高
-            parts = []
+            kept = []
             for segment in segments:
                 if getattr(segment, "no_speech_prob", 0.0) > _NO_SPEECH_PROB:
                     continue
                 if getattr(segment, "avg_logprob", 0.0) < _MIN_AVG_LOGPROB:
                     continue
-                parts.append(segment.text)
-            text = "".join(parts).strip()
+                kept.append(segment)
+            text = "".join(segment.text for segment in kept).strip()
+            conf = min((float(segment.avg_logprob) for segment in kept),
+                       default=0.0)
         except Exception as exc:  # noqa: BLE001 - 单句识别失败不影响后续
             self._log.error(f"语音识别失败：{exc}")
             return
@@ -256,7 +279,7 @@ class MicAsr:
         if _is_hotword_hallucination(text, self._hotwords):
             self._log.warn(f"丢弃热词幻觉：{text}")
             return
-        self._log.info(f"麦克风识别：{text}（{cost:.1f}s）")
+        self._log.info(f"麦克风识别：{text}（{cost:.1f}s，置信 {conf:.2f}）")
         self._on_text(text)
 
     # ---------------------------------------------------------------- 音频流开关

@@ -190,6 +190,12 @@ class Navigator:
         self._network_failed = False
         self._transport_failures = 0
         self._pending_cancel = False
+        # 只有「任务可能已下发但没拿到 action_id」时才允许取消全部任务；
+        # 平时绝不能 cancel all，否则会误杀其他进程/项目的导航。
+        self._cancel_all_needed = False
+        # 最近一次「观众喊停」的时间：取消线程可能先把 pending 标记清掉，
+        # 轮询线程要靠这个时间判断 cancelled 是自己停的还是被别人抢占。
+        self._cancel_requested_at = 0.0
         self._active_action_id = None
         self._last_good_pose = None
         # 最近一次「定位正常且位姿可信」的观测时间，及这段连续正常的起点
@@ -236,6 +242,24 @@ class Navigator:
 
     def poi_names(self) -> list[str]:
         return list(self._load_pois())
+
+    def poi_approach_yaw(self, poi_name: str):
+        """主线上正向进入该点位的朝向（上一站 -> 本站），取不到返回 None。
+
+        去程/返程的判断靠它：实际进入朝向与它相差接近 180° 就是从
+        主线反方向（返程）进来的。
+        """
+        names = self._main_line
+        if poi_name not in names:
+            return None
+        index = names.index(poi_name)
+        if index <= 0:
+            return None
+        prev = self._poi_pose(names[index - 1])
+        cur = self._poi_pose(poi_name)
+        if prev is None or cur is None:
+            return None
+        return math.atan2(cur[1] - prev[1], cur[0] - prev[0])
 
     def _poi_pose(self, poi_name: str):
         """取点位位姿 (x, y, yaw)；地图上没有该点返回 None。"""
@@ -631,6 +655,33 @@ class Navigator:
             time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
         return False
 
+    def warm_localization(self) -> None:
+        """空闲或被挡等待时预热定位，把「连续正常 3 秒」提前攒够。
+
+        真正下发导航前仍会完整走健康与定位门控；这里只是让稳定窗口在
+        等待期间就开始计时，路通后不用再原地干等 3 秒。
+        """
+        if self._active_action_id is not None:
+            return
+        try:
+            if self._slam_status() != 0:
+                self._last_ok_at = None
+                self._ok_since = None
+                return
+            pose = self._read_pose()
+        except Exception:  # noqa: BLE001 - 预热失败不影响正常导航
+            return
+        if not self._pose_confident(pose):
+            self._last_ok_at = None
+            self._ok_since = None
+            return
+        now = time.monotonic()
+        # 距上次观测太久，说明中间没人盯着，重新开始累计，避免误判稳定
+        if (self._last_ok_at is None or self._ok_since is None
+                or now - self._last_ok_at > _LOCALIZATION_RECENT_S):
+            self._ok_since = now
+        self._last_ok_at = now
+
     def recover_here(self, timeout_s: float = _RECOVER_WAIT_S) -> bool:
         """最多主动恢复一次：优先吸附 3m 内点位，其次近期可信位姿。"""
         if timeout_s <= _LOCALIZATION_STABLE_S:
@@ -814,7 +865,9 @@ class Navigator:
             self._log.info(
                 f"已下发原地转身 {math.degrees(angle_rad):+.0f}°，"
                 f"action_id={action_id}")
-            return self._run_action(action_id, "原地转身", deadline)
+            # 转身不需要前向防撞（guard=None）：原地旋转时正前方会一直
+            # 有画面变化，按防撞判断会误取消，且这里也没有 leg。
+            return self._run_action(action_id, "原地转身", deadline, None)
         finally:
             if self._cancel_action():
                 self._set_aeb(False)
@@ -850,6 +903,11 @@ class Navigator:
         for attempt in range(_LEG_ATTEMPTS):
             if time.monotonic() >= deadline:
                 return "timeout"
+            if self._pending_cancel:
+                # 喊停可能发生在定位/健康检查期间，这时还没下发任务
+                if not self._cancel_all_needed:
+                    self._pending_cancel = False
+                return "cancelled"
             if attempt:
                 self._log.warn(f"{leg.name} 重试前重新检查定位（{attempt+1}/{_LEG_ATTEMPTS}）")
                 time.sleep(_REDISPATCH_SETTLE_S)
@@ -868,7 +926,8 @@ class Navigator:
                     return "network"
                 continue
             outcome = self._run_action(action_id, leg.name, deadline, guard, leg)
-            if outcome in ("success", "blocked", "timeout", "localization", "network"):
+            if outcome in ("success", "blocked", "timeout", "localization",
+                           "network", "cancelled"):
                 return outcome
         self._log.error(f"{leg.name} 连续 {_LEG_ATTEMPTS} 次导航任务失败")
         return "failure"
@@ -979,6 +1038,15 @@ class Navigator:
         query_failures = 0
         while True:
             now = time.monotonic()
+            if self._pending_cancel:
+                # 观众喊停：不要等这一段跑完，立即取消底盘任务
+                self._log.info(f"收到停车请求，立即取消任务 {action_id}")
+                self._cancel_and_settle(action_id)
+                # 清掉本次停车标记，否则下一次导航会被立刻取消
+                self._pending_cancel = False
+                self._active_action_id = None
+                self._cancel_all_needed = False
+                return "cancelled"
             if now >= deadline:
                 self._log.error(
                     f"导航到 {label} 超时，取消任务 {action_id}")
@@ -1023,6 +1091,19 @@ class Navigator:
             state = classify(status)
             if state != "running":
                 self._active_action_id = None
+                raw = str(
+                    status.get("status") or status.get("state") or ""
+                ).lower() if isinstance(status, dict) else ""
+                stopped = raw in {"cancelled", "canceled",
+                                  "stopped", "aborted"}
+                if stopped and time.monotonic() - self._cancel_requested_at <= 5.0:
+                    # 取消线程可能已经消费掉 pending 标记，这里按观众喊停处理
+                    self._log.info(f"{label} 已按停车请求取消")
+                    return "cancelled"
+                if stopped:
+                    self._log.error(
+                        f"{label} 的任务 {action_id} 被外部取消，"
+                        "可能有其他导航节点在抢占底盘")
             if state == "success":
                 # 低置信度期间 REST 位姿会冻结，先等可信新位姿再做位置校验。
                 stable = self._wait_slam_ok(min(
@@ -1135,6 +1216,7 @@ class Navigator:
             # PUT 超时不等于底盘未接单，不能直接重新发送另一个任务。
             self._network_failed = True
             self._pending_cancel = True
+            self._cancel_all_needed = True
             self._active_action_id = None
             self._log.error(f"下发 move_to({leg.name}) 结果不确定，禁止重发：{exc}")
             return None
@@ -1146,10 +1228,12 @@ class Navigator:
             if not isinstance(response, dict) or response.get("success") is not False:
                 self._pending_cancel = True
                 self._network_failed = True
+                self._cancel_all_needed = True
             self._log.error(
                 f"导航到 {leg.name} 未返回 action_id：{response!r}")
             return None
         self._active_action_id = action_id
+        self._cancel_all_needed = False
         self._log.info(
             f"已下发 move_to({leg.name}, x={leg.x:.2f}, y={leg.y:.2f}, "
             f"yaw={leg.yaw:.2f})，action_id={action_id}")
@@ -1223,9 +1307,22 @@ class Navigator:
             return False
 
     def cancel(self) -> bool:
-        """外部请求停车：标记待取消并立即取消当前活动任务。"""
+        """外部请求停车：立即标记，只取消本节点确认下发的任务。
+
+        没有自己的活动任务时也要留下停车标记，让还没下发的这一段
+        直接结束，避免「喊停后车又自己起步」。
+        """
         self._pending_cancel = True
+        self._cancel_requested_at = time.monotonic()
+        if self._active_action_id is None and not self._cancel_all_needed:
+            return True
         return self._cancel_action()
+
+    def clear_cancel(self) -> None:
+        """清掉已经处理过的停车标记，避免影响下一次导航。"""
+        if self._active_action_id is None and not self._cancel_all_needed:
+            self._pending_cancel = False
+            self._cancel_requested_at = 0.0
 
     def pose(self):
         """当前位置（含定位置信度），读不到返回 None。"""
@@ -1239,6 +1336,9 @@ class Navigator:
         if self._active_action_id is None and not self._pending_cancel:
             return True
         action_id = self._active_action_id
+        if action_id is None and not self._cancel_all_needed:
+            self._pending_cancel = False
+            return True
         if not self._cancel(action_id):
             return False
         if action_id is not None:
@@ -1253,4 +1353,5 @@ class Navigator:
                 return False
         self._pending_cancel = False
         self._active_action_id = None
+        self._cancel_all_needed = False
         return True

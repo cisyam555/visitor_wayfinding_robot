@@ -3,7 +3,7 @@
 用法：
     source /opt/ros/jazzy/setup.bash
     source ~/xos/setup.bash
-    source ~/guide_robot/learn/learn3_D/install/setup.bash
+    source ~/guide_robot/learn/visitor_wayfinding_robot/install/setup.bash
     ros2 launch learn3_d tour.launch.py
 
 换地图或点位不用改文件，命令行覆盖即可：
