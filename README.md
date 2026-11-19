@@ -4,6 +4,16 @@
 
 本项目负责“带人去某个地方”；固定路线参观与逐站讲解由 [guided_tour_robot](https://github.com/cisyam555/guided_tour_robot) 实现。
 
+## 实机演示
+
+点击封面打开演示视频。视频记录于 2026 年 11 月 19 日，时长约 3 分 42 秒。
+
+[![访客带路机器人实机演示](docs/images/wayfinding-demo.jpg)](https://github.com/cisyam555/visitor_wayfinding_robot/raw/refs/heads/main/docs/videos/wayfinding-demo.mp4)
+
+[观看 / 下载演示视频](https://github.com/cisyam555/visitor_wayfinding_robot/raw/refs/heads/main/docs/videos/wayfinding-demo.mp4) · [查看仓库内视频文件](docs/videos/wayfinding-demo.mp4)
+
+视频原文件保存在仓库中；GitHub README 展示封面，点击后由浏览器打开或下载 MP4。
+
 ## 网页预览
 
 机器人连接状态下的实际网页截图，展示头部相机画面、电池与主机数据。截图是当时状态的记录，不代表当前导航状态。
@@ -36,6 +46,15 @@
 | 前方被挡 | 保留目标、停车让行；道路清空后续行 |
 
 到点按配置左转或右转展示，播报后默认再停留 2 秒并转回；从反方向进入点位时调整转向方向。回到待命点后尝试恢复离开时的朝向。
+
+## 语音交互改进
+
+- **减少指令被回声吞掉**：识别文本混入机器人刚说过的话时，先尝试剥离播报片段，再处理剩余用户指令；纯回声仍会被过滤。
+- **短句衔接**：对“带我去”与随后识别的地点进行短时间拼接，减少断句造成的目的地丢失。
+- **模型回退**：配置的识别模型加载失败时，尝试使用 `small`；两者都加载失败则停用本地麦克风识别并记录错误。
+- **识别参数可调**：启动时可配置模型、beam、VAD 能量阈值和断句静音时间，在反应速度、识别效果与现场噪声间调整。
+
+这些处理改善交互容错，实际识别效果仍取决于距离、噪声、麦克风和模型。
 
 ## 技术实现
 
@@ -77,6 +96,10 @@ ros2 launch learn3_d tour.launch.py
 | `enable_nav` | `true` | 是否启用导航 |
 | `enable_presence` | `true` | 靠近检测与问候 |
 | `qwen_base_url` / `qwen_model` | 见 launch | 模型服务与模型名称 |
+| `asr_model` | `small` | 本地识别模型，需预先准备模型文件或允许下载 |
+| `asr_beam_size` | `3` | 识别搜索宽度，增大通常也会增加耗时 |
+| `vad_threshold` | `300.0` | 语音能量阈值，嘈杂环境可调大 |
+| `vad_silence_s` | `0.4` | 判定一句话结束的静音秒数 |
 
 ```bash
 # 指定地图及待命点
@@ -87,6 +110,9 @@ ros2 launch learn3_d tour.launch.py await_timeout:=0 pause_timeout:=0
 
 # 只测试对话，不启用导航
 ros2 launch learn3_d tour.launch.py enable_nav:=false
+
+# 调整本地语音识别与断句
+ros2 launch learn3_d tour.launch.py asr_model:=small asr_beam_size:=3 vad_threshold:=300.0 vad_silence_s:=0.4
 ```
 
 地点与别名修改 `src/learn3_d/config/places.yaml`，点位名必须与底盘一致。默认地点为乐知教育、核心力量跑酷、创想谷、厕所和跆拳道馆。新增地点还需核对主线、支线和到点转向配置。
