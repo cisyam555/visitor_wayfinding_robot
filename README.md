@@ -137,15 +137,15 @@ bash web/start_monitor.sh --port 8765
 
 ## 代码入口
 
-| 文件 | 职责 |
-| --- | --- |
-| `src/learn3_d/learn3_d/tour_chat.py` | 状态机、意图分发、播报与自动回程 |
-| `src/learn3_d/learn3_d/nav_core.py` | 任务下发与取消、定位恢复、到点校验、转身 |
-| `src/learn3_d/learn3_d/mic_asr.py` | 音频、VAD 与本地识别 |
-| `src/learn3_d/learn3_d/front_guard.py` | 前向深度检测 |
-| `src/learn3_d/config/places.yaml` | 地点、别名与主线 |
-| `src/learn3_d/launch/tour.launch.py` | 启动参数 |
-| `web/` | 独立工作台及其测试 |
+点击文件名可查看源码。建议先看启动文件，再看主节点，最后看导航与语音模块。
+
+- [tour.launch.py](src/learn3_d/launch/tour.launch.py)：启动入口，配置地图、回程等待时间和语音参数。
+- [tour_chat.py](src/learn3_d/learn3_d/tour_chat.py)：主节点，处理意图、交互状态、播报和自动回程。
+- [nav_core.py](src/learn3_d/learn3_d/nav_core.py)：底盘导航，处理任务下发与取消、定位恢复、到点校验和转身。
+- [mic_asr.py](src/learn3_d/learn3_d/mic_asr.py)：麦克风音频、语音断句与本地识别。
+- [front_guard.py](src/learn3_d/learn3_d/front_guard.py)：前向深度检测。
+- [places.yaml](src/learn3_d/config/places.yaml)：地点、别名和主线配置。
+- [web 目录](web/)：网页工作台、监测服务及测试。
 
 ## 排障与运行边界
 
