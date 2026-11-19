@@ -9,6 +9,14 @@
 - ROS 2 Jazzy / ament_python 包名：`learn3_d`
 - 当前目录：`/home/nvidia/guide_robot/learn/visitor_wayfinding_robot`
 
+## 网页预览
+
+访客带路工作台的页面效果，包含任务或路线展示、相机区域及设备状态。截图为本地页面预览，实时数据需连接机器人后显示。
+
+![访客带路工作台网页截图](docs/images/web-dashboard.png)
+
+网页启动与使用方法见 [Web 工作台说明](web/README.md)。
+
 ## 功能
 
 - **连续语音识别**：直接从 `/lyre/audio_stream` 取麦克风音频，96 kHz 重采样到
