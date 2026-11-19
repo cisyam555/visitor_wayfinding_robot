@@ -6,13 +6,11 @@
 
 ## 实机演示
 
-点击封面打开演示视频。视频记录于 2026 年 11 月 19 日，时长约 3 分 42 秒。
+点击下方播放器的播放按钮，即可在 GitHub 页面内观看。视频记录于 2026 年 11 月 19 日，时长约 3 分 42 秒。
 
-[![访客带路机器人实机演示](docs/images/wayfinding-demo.jpg)](https://github.com/cisyam555/visitor_wayfinding_robot/raw/refs/heads/main/docs/videos/wayfinding-demo.mp4)
+https://github.com/user-attachments/assets/1db069cb-c379-418b-94f1-81ea591590b7
 
-[观看 / 下载演示视频](https://github.com/cisyam555/visitor_wayfinding_robot/raw/refs/heads/main/docs/videos/wayfinding-demo.mp4) · [查看仓库内视频文件](docs/videos/wayfinding-demo.mp4)
-
-视频原文件保存在仓库中；GitHub README 展示封面，点击后由浏览器打开或下载 MP4。
+在线播放版经过压缩，保留完整时长和声音。[下载原始视频](https://github.com/cisyam555/visitor_wayfinding_robot/raw/refs/heads/main/docs/videos/wayfinding-demo.mp4)。若播放器未加载，请刷新页面，或下载后使用本地播放器观看。
 
 ## 网页预览
 
