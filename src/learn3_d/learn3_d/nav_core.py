@@ -785,6 +785,40 @@ class Navigator:
             else:
                 self._log.error("任务取消尚未确认，保留 AEB 并禁止新的导航任务")
 
+    def rotate_by(self, angle_rad: float, timeout_s: float = 25.0) -> str:
+        """原地转身；angle_rad 正为左转（逆时针），负为右转。"""
+        if abs(angle_rad) < 1e-3:
+            return "success"
+        deadline = time.monotonic() + timeout_s
+        if not self._check_localization(deadline):
+            return "network" if self._network_failed else "localization"
+        if not self._check_health():
+            return "network" if self._network_failed else "health"
+        self._set_aeb(True)
+        try:
+            try:
+                response = self._chassis.move_by(
+                    direction=max(-math.pi, min(math.pi, float(angle_rad))),
+                    move_mode=1)
+            except Exception as exc:  # noqa: BLE001 - 下发失败只回报
+                self._record_transport_failure(exc)
+                self._log.error(f"下发原地转身失败：{exc}")
+                return "network" if _transport_error(exc) else "failure"
+            action_id = (
+                str(response.get("action_id") or "")
+                if isinstance(response, dict) else "")
+            if not action_id or response.get("success") is False:
+                self._log.error(f"原地转身未返回 action_id：{response!r}")
+                return "failure"
+            self._active_action_id = action_id
+            self._log.info(
+                f"已下发原地转身 {math.degrees(angle_rad):+.0f}°，"
+                f"action_id={action_id}")
+            return self._run_action(action_id, "原地转身", deadline)
+        finally:
+            if self._cancel_action():
+                self._set_aeb(False)
+
     def _navigate_by_track(self, poi_name: str, deadline: float, guard) -> str:
         """走底盘原生轨道导航：整条轨道一次下发，由底盘按轨道点行驶。"""
         target = (self._load_pois() or {}).get(poi_name)

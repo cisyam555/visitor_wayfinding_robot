@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import math
 import os
 import queue
 import re
@@ -194,6 +195,11 @@ class Speech:
             time.sleep(0.2)
 
 
+def _wrap_angle(angle: float) -> float:
+    """把角度归一化到 [-pi, pi]，用于比较转身前后的朝向差。"""
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
 _NAV_FAIL_TEXT = {
     "localization": "定位还没恢复，我先不走，稍等一下再试",
     "health": "底盘状态有问题，暂时不能移动",
@@ -257,6 +263,59 @@ class RouteNavigator:
     def cancel(self):
         self._cancelled = True
         return self._nav.cancel()
+
+    def turn(self, angle_deg, timeout=25.0):
+        """原地转身，正为左转、负为右转；转身前确认正前方无人。
+
+        转完用定位 yaw 校验实际角度，偏差超过 15° 补转一次。
+        """
+        if abs(angle_deg) < 1.0:
+            return True
+        if not self._wait_front_before_turn():
+            self._log.warn("转身前正前方一直有人，暂不转身")
+            return False
+        target = math.radians(angle_deg)
+        before = self._yaw_of(self.pose())
+        result = self._nav.rotate_by(target, timeout_s=timeout)
+        if result != "success":
+            self._log.warn(f"原地转身 {angle_deg:+.0f}° 未完成：{result}")
+            return False
+        after = self._yaw_of(self.pose())
+        if before is None or after is None:
+            return True
+        actual = _wrap_angle(after - before)
+        remaining = _wrap_angle(target - actual)
+        if abs(math.degrees(remaining)) > 15.0:
+            self._log.warn(
+                f"转身实际 {math.degrees(actual):+.0f}°，"
+                f"补转 {math.degrees(remaining):+.0f}°")
+            return self._nav.rotate_by(
+                remaining, timeout_s=timeout) == "success"
+        return True
+
+    @staticmethod
+    def _yaw_of(pose):
+        try:
+            return float(pose["yaw"])
+        except (TypeError, KeyError, ValueError):
+            return None
+
+    def _wait_front_before_turn(self, timeout=8.0):
+        """转身前等正前方清空，避免旁边有人时擦碰。"""
+        guard = self._guard
+        if guard is None:
+            return True
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                distance = guard.distance()
+                limit = float(guard.stop_distance())
+            except Exception:  # noqa: BLE001 - 读不到深度就按可转处理
+                return True
+            if distance is None or distance >= limit:
+                return True
+            time.sleep(0.3)
+        return False
 
     def was_cancelled(self):
         return self._cancelled
@@ -339,6 +398,13 @@ class TourChat(Node):
         self.declare_parameter("front_guard_enabled", True)
         self.declare_parameter("front_guard_distance", 0.5)
         self.declare_parameter("obstacle_repeat", 15.0)
+        # 到点后原地转身：格式 "点位:left,点位:right"，转完播报，
+        # 等 arrival_turn_hold 秒再转回来
+        self.declare_parameter(
+            "arrival_turns",
+            "核心力量跑酷:right,创想谷:left,厕所:left,跆拳道馆:left")
+        self.declare_parameter("arrival_turn_angle", 90.0)
+        self.declare_parameter("arrival_turn_hold", 10.0)
         self.declare_parameter("places_file", "")
         self.declare_parameter("log_file", "")
 
@@ -391,6 +457,13 @@ class TourChat(Node):
             or "障碍物已移除，我继续回家")
         self._obstacle_repeat = max(
             5.0, float(self.get_parameter("obstacle_repeat").value))
+        self._arrival_turn_angle = float(
+            self.get_parameter("arrival_turn_angle").value)
+        self._arrival_turn_hold = max(
+            0.0, float(self.get_parameter("arrival_turn_hold").value))
+        self._arrival_turns = self._parse_arrival_turns(
+            str(self.get_parameter("arrival_turns").value or ""))
+        self._home_yaw = None       # 离开待命点时的朝向，回来要转回去
         self._here = ""            # 当前所在点位，供闲聊注入
         self._llm_down_until = 0.0  # 模型刚失败过就短暂停用，避免连等两次超时
         self._last_spoken = ""
@@ -532,6 +605,10 @@ class TourChat(Node):
                                 self._places.branches)
             self.get_logger().info(f"地点配置：{path}")
             self.get_logger().info(f"可去的地点：{self._places.describe()}")
+            # 兜底记录待命朝向：开机时可能不在待命点，先记下当前朝向，
+            # 免得第一次送客前没记到，回程时无处可转。
+            threading.Thread(target=self._remember_home_yaw,
+                             daemon=True).start()
         except Exception as exc:  # noqa: BLE001 - 导航不可用时只保留聊天
             self._nav = None
             self._places = None
@@ -1043,6 +1120,16 @@ class TourChat(Node):
                 if not ok:
                     self._speak(message)
                     return
+            # 记下离开待命点时的朝向，回程结束后要转回去
+            if not standby and self._nav is not None:
+                home = self._places.standby if self._places else None
+                at_home = bool(home and self._here == home.spoken)
+                if self._home_yaw is None or at_home:
+                    pose = self._nav.pose()
+                    try:
+                        self._home_yaw = float(pose["yaw"])
+                    except (TypeError, KeyError, ValueError):
+                        pass
             target = place.spoken
             if standby:
                 # 回程先明确回应一句，不能一声不吭就走
@@ -1131,14 +1218,22 @@ class TourChat(Node):
             if standby:
                 self._awaiting = False
                 self._qwen.reset()  # 一轮结束，忘掉这批观众的对话
+                self._face_home()  # 转回离开待命点时的方向
                 self._speak(f"好的，我已经回到{place.spoken}待命，有事随时叫我",
                             listen=True)
             else:
+                # 先按点位配置原地转身，再说到点；保持 10 秒后转回
+                turn_angle = self._turn_on_arrival(place.poi)
                 # 固定短句而不是让模型自由发挥，避免到达后长篇大论把
                 # 观众那句「没事了你回去吧」压在播报里听不到。
                 self._speak(self._arrival_line(place.spoken), listen=True)
                 self._awaiting = True
                 self._awaiting_at = time.monotonic()
+                if turn_angle:
+                    self._hold_arrival_pose()
+                    self._turn_back(turn_angle)
+                    # 转身耗时不算进等待观众的 35 秒
+                    self._awaiting_at = time.monotonic()
         finally:
             self._arriving = False
 
@@ -1156,6 +1251,81 @@ class TourChat(Node):
             if target is not None:
                 self.get_logger().info("到达后收到回程指令，立即返回待命点")
                 self._navigate(target, standby=True)
+
+    @staticmethod
+    def _parse_arrival_turns(raw: str) -> dict:
+        """解析「点位:left,点位:right」；left=+1，right=-1。"""
+        turns = {}
+        for item in raw.replace("，", ",").split(","):
+            name, _, direction = item.partition(":")
+            name = name.strip()
+            direction = direction.strip().lower()
+            if direction in ("left", "l", "左", "左转"):
+                turns[name] = 1
+            elif direction in ("right", "r", "右", "右转"):
+                turns[name] = -1
+        return turns
+
+    def _turn_on_arrival(self, poi: str) -> float:
+        """到达点位后按配置原地转身，返回实际转过的角度。"""
+        sign = self._arrival_turns.get(poi)
+        if sign is None or self._nav is None:
+            return 0.0
+        angle = sign * self._arrival_turn_angle
+        if not self._nav.turn(angle):
+            return 0.0
+        side = "左" if sign > 0 else "右"
+        self.get_logger().info(f"到达 {poi}，原地{side}转 {abs(angle):.0f}°")
+        self._file_log("转身", f"{poi} {side}转 {abs(angle):.0f}°")
+        return angle
+
+    def _turn_back(self, angle: float) -> None:
+        if abs(angle) < 1.0 or self._nav is None:
+            return
+        if self._nav.turn(-angle):
+            self.get_logger().info(f"展示结束，转回原方向 {-angle:+.0f}°")
+            self._file_log("转身", "转回原方向")
+
+    def _hold_arrival_pose(self) -> None:
+        """保持转身姿态等待；有人下新指令就提前结束。"""
+        deadline = time.monotonic() + self._arrival_turn_hold
+        while time.monotonic() < deadline:
+            if (self._retarget is not None or self._home_requested
+                    or self._pause_requested or not self._queue.empty()):
+                return
+            time.sleep(0.2)
+
+    def _remember_home_yaw(self, delay: float = 2.0) -> None:
+        """启动兜底：延时读一次当前朝向，作为回程要转回的朝向。"""
+        if delay > 0:
+            time.sleep(delay)
+        if self._home_yaw is not None or self._nav is None:
+            return
+        pose = self._nav.pose()
+        try:
+            self._home_yaw = float(pose["yaw"])
+        except (TypeError, KeyError, ValueError):
+            return
+        self.get_logger().info(
+            f"记下待命朝向 {math.degrees(self._home_yaw):+.0f}°")
+
+    def _face_home(self) -> None:
+        """回到待命点后转回离开时的朝向。"""
+        if self._nav is None or self._home_yaw is None:
+            return
+        pose = self._nav.pose()
+        try:
+            current = float(pose["yaw"])
+        except (TypeError, KeyError, ValueError):
+            return
+        delta = math.atan2(math.sin(self._home_yaw - current),
+                           math.cos(self._home_yaw - current))
+        if abs(delta) < math.radians(8):
+            return
+        if self._nav.turn(math.degrees(delta)):
+            self.get_logger().info(
+                f"回到待命点，转回原方向 {math.degrees(delta):+.0f}°")
+            self._file_log("转身", "回到待命点转回原方向")
 
     def _arrival_line(self, target: str) -> str:
         return f"我们到{target}了，还有什么事吗？"
