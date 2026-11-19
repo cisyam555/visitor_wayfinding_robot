@@ -1,159 +1,289 @@
-# 访客带路机器人 · Visitor Wayfinding Robot
+<div align="center">
 
-面向展厅与教育空间的语音带路项目。访客说出目的地，机器人识别地点、导航送达、播报到达信息；送达后或叫停后无人继续交互，会按配置自动回到待命点。
+# 小静 · 访客带路机器人
 
-本项目负责“带人去某个地方”；固定路线参观与逐站讲解由 [guided_tour_robot](https://github.com/cisyam555/guided_tour_robot) 实现。
+**Visitor Wayfinding Robot**
+
+从一句“带我去”，到送达目的地，再自动回到待命点。
+
+![ROS 2 Jazzy](https://img.shields.io/badge/ROS_2-Jazzy-22314E)
+![Python 3](https://img.shields.io/badge/Python-3-3776AB)
+![faster-whisper](https://img.shields.io/badge/ASR-faster--whisper-0F766E)
+[![License](https://img.shields.io/badge/License-Apache--2.0-blue)](src/learn3_d/LICENSE)
+
+[实机演示](#实机演示) · [功能介绍](#功能介绍) · [快速开始](#快速开始) · [网页工作台](#网页工作台) · [代码入口](#代码入口)
+
+</div>
+
+## 项目介绍
+
+小静是面向展厅、教育空间等室内场景的访客带路机器人应用。访客通过自然语言提出目的地，机器人完成地点理解、确认、导航、到达交互和自动回程，形成一次完整的带路服务。
+
+项目基于 **ROS 2 Jazzy**，集成本地语音识别、平台 TTS、Qwen 对话接口与底盘 REST 导航，并提供独立的 Web 工作台。地点指令优先由本地规则处理，模糊表达再交给模型推断，模型返回的目的地必须通过已知点位校验。
+
+本仓库侧重按访客需求前往指定地点。按固定路线逐站参观、讲解的项目见 [guided_tour_robot](https://github.com/cisyam555/guided_tour_robot)。
+
+> 仓库包含应用代码与工作台。运行依赖机器人已有的底盘 SDK、地图、相机、麦克风及平台语音服务；克隆代码到普通电脑后不能直接控制机器人。
 
 ## 实机演示
 
-点击下方播放器的播放按钮，即可在 GitHub 页面内观看。视频记录于 2026 年 11 月 19 日，时长约 3 分 42 秒。
+2026 年 11 月 19 日实机视频，时长约 **3 分 42 秒**。点击下方播放器即可在 GitHub 内观看。
 
 https://github.com/user-attachments/assets/1db069cb-c379-418b-94f1-81ea591590b7
 
-在线播放版经过压缩，保留完整时长和声音。[下载原始视频](https://github.com/cisyam555/visitor_wayfinding_robot/raw/refs/heads/main/docs/videos/wayfinding-demo.mp4)。若播放器未加载，请刷新页面，或下载后使用本地播放器观看。
+在线播放版保留完整时长和声音。[下载原始 MP4](https://github.com/cisyam555/visitor_wayfinding_robot/raw/refs/heads/main/docs/videos/wayfinding-demo.mp4)。播放器无法加载时可下载后观看。
 
-## 网页预览
+## 功能介绍
 
-**[打开实时工作台（机器人局域网）](http://192.168.21.19:8765/)** · [查看启动与使用说明](web/README.md)
+- **自然语言带路**：明确目的地直接导航，只说地点先确认，间接需求通过模型推断并校验。
+- **连续语音交互**：本地 faster-whisper 无需唤醒词；同时支持平台 ASR 和 ROS 文本输入。
+- **途中交互**：识别叫停、改道、回程及叫住提问等意图，取消或暂停当前任务后处理。
+- **到点展示**：按地点配置转向、播报、短暂停留并转回；回程尝试恢复待命朝向。
+- **自动回程**：送达后或被叫停后，默认 35 秒无人继续交互则返回待命点；明确回程指令无需等超时。
+- **前向障碍处理**：结合深度相机与底盘导航，遇阻停车让行，保留目标并在道路清空后续行。
+- **语音容错**：过滤播报回声、剥离混入指令的播报片段、衔接被断句的目的地表达，支持识别模型加载失败回退。
+- **运行监测**：查看相机、主机资源、电池、任务日志与沿线示意位置，支持经确认的节点和指令操作。
 
-实时工作台运行在机器人上。请先启动下方监测服务，并让电脑与机器人连接同一局域网；机器人 IP 变化后需替换链接中的地址。GitHub 上展示的是项目说明、视频和截图，不会运行机器人监测服务。
+### 交互示例
 
-```bash
-cd /home/nvidia/guide_robot/learn/visitor_wayfinding_robot
-bash web/start_monitor.sh --port 8765
-```
-
-机器人连接状态下的实际网页截图，展示头部相机画面、电池与主机数据。截图是当时状态的记录，不代表当前导航状态。
-
-![小静带路工作台](docs/images/web-dashboard.jpg)
-
-网页提供设备监测、相机画面、运行示意图与指令入口，启动命令及操作说明见 [工作台使用文档](web/README.md)。
-
-## 功能与交互流程
-
-```text
-待命 → 有人靠近 → 问候 → 理解目的地 → 导航 → 到点转身展示 → 交互等待
-                            ↑          ↓                         ↓
-                         确认/改道   叫停或被叫住             结束语/等待超时
-                                       ↓                         ↓
-                                  暂停、继续或回程 ←──────── 自动回待命点
-```
-
-| 场景 | 行为 |
+| 你说 | 机器人处理 |
 | --- | --- |
-| “带我去创想谷” | 匹配地点后直接导航 |
-| 只说“创想谷” | 询问是否需要带路，确认后出发 |
-| “我想练跆拳道” | 模型推断地点，校验为已配置点位后询问确认 |
-| 导航中说“停一下” | 请求取消当前导航，进入暂停 |
-| 导航中说新目的地 | 取消当前任务，改去新目标 |
-| 被叫住或询问 | 按本地意图规则暂停并处理，普通无关输入可能被忽略 |
-| “继续” | 恢复暂停的目标 |
-| “回去吧 / 没事了” | 返回待命点 |
-| 送达或暂停后无人说话 | 默认 35 秒后自动回程，可分别配置 |
-| 前方被挡 | 保留目标、停车让行；道路清空后续行 |
+| 带我去创想谷 | 匹配点位后出发 |
+| 创想谷 | 先询问是否需要带路 |
+| 我想练跆拳道 | 推断到已配置地点，再询问确认 |
+| 停一下 | 请求取消导航并进入暂停 |
+| 改去厕所 | 取消原任务，切换目标 |
+| 继续 | 恢复暂停的目的地 |
+| 回去吧 / 没事了 | 按当前交互状态处理回程 |
 
-到点按配置左转或右转展示，播报后默认再停留 2 秒并转回；从反方向进入点位时调整转向方向。回到待命点后尝试恢复离开时的朝向。
+关键指令可打断播报；普通闲聊在播报或导航期间可能被忽略。语音叫停涉及识别和底盘通信延迟，不替代硬件急停。
 
-## 语音交互改进
+## 服务流程
 
-- **减少指令被回声吞掉**：识别文本混入机器人刚说过的话时，先尝试剥离播报片段，再处理剩余用户指令；纯回声仍会被过滤。
-- **短句衔接**：对“带我去”与随后识别的地点进行短时间拼接，减少断句造成的目的地丢失。
-- **模型回退**：配置的识别模型加载失败时，尝试使用 `small`；两者都加载失败则停用本地麦克风识别并记录错误。
-- **识别参数可调**：启动时可配置模型、beam、VAD 能量阈值和断句静音时间，在反应速度、识别效果与现场噪声间调整。
+```mermaid
+flowchart TD
+    A[待命] --> B[有人靠近后问候]
+    B --> C[接收语音或文本]
+    C --> D{目的地意图}
+    D -->|明确地点指令| E[导航送客]
+    D -->|只说地名或模糊需求| F[校验地点并询问确认]
+    F -->|确认| E
+    D -->|其他问题| G[对话回复]
+    G --> C
+    E -->|到达| H[转向展示与到达播报]
+    E -->|叫停或被叫住| I[暂停交互]
+    E -->|改道| E
+    E -->|障碍| J[停车让行]
+    J -->|道路清空| E
+    H --> K[等待后续需求]
+    I -->|继续| E
+    I -->|回程指令或超时| L[返回待命点]
+    K -->|回程指令或超时| L
+    K -->|新目的地| E
+    L -->|到达并恢复朝向| A
+```
 
-这些处理改善交互容错，实际识别效果仍取决于距离、噪声、麦克风和模型。
+默认到点转向角度为 90°，播报结束后再停留 2 秒并转回。送达等待和暂停等待分别计时；回程失败时需要根据日志处理，不保证所有异常都能自动恢复。
 
-## 技术实现
+## 技术架构
 
-- **ROS 2 节点**：`learn3_d/tour_chat` 编排语音、意图、导航和播报。
-- **语音入口**：本地 faster-whisper、平台 ASR、`/tour/chat` 文本话题；本地语音无需唤醒词。
-- **地点理解**：`places.yaml` 别名匹配优先；模糊意图使用 OpenAI 兼容的 Qwen 接口，结果须通过地点校验。
-- **底盘控制**：`robot_controller` SDK 调用底盘 REST 服务，下发异步导航任务并轮询结果；并非通过 `/cmd_vel` 直接控制速度。
-- **播报**：复用平台 TTS，串行播报并临时切换项目音色；关键指令可打断播报，普通闲聊在播报期间可能被忽略。
-- **冲突防护**：文件锁拒绝重复启动本项目；启动时提示其他可能抢占底盘的导航进程。
+```mermaid
+flowchart LR
+    M[麦克风音频] --> ASR[本地 faster-whisper]
+    P[平台 ASR] --> N[tour_chat 主节点]
+    T[ROS 文本话题] --> N
+    ASR --> N
+    N --> R[地点规则与交互状态机]
+    R <-->|模糊意图与问答| Q[Qwen 兼容接口]
+    R --> V[平台 TTS]
+    R --> NAV[导航核心]
+    DEPTH[头部深度相机] --> GUARD[前向检测]
+    GUARD --> NAV
+    NAV <-->|REST 异步任务| BASE[底盘导航服务]
+    WEB[独立 Web 工作台] -.->|监测主机、ROS、相机和底盘| BASE
+    WEB -.->|经确认的文本指令| T
+```
 
-语音识别、网络请求及底盘取消都有延迟，代码中的叫停逻辑不等同于经过认证的硬件急停。
+导航由底盘服务规划并执行，应用负责目标下发、结果轮询、取消与异常处理。本项目不直接通过 `/cmd_vel` 实现带路。模型不直接生成底盘运动指令。
 
-## 环境与构建
+## 快速开始
 
-运行环境：机器人上的 ROS 2 Jazzy、`/home/nvidia/xos` 平台工作空间、底盘 SDK，以及 `numpy`、`PyYAML`、`faster-whisper`。网页另需 `psutil`、OpenCV。地图及 POI 保存在底盘中，仓库不包含完整机器人平台。
+### 1. 准备运行环境
+
+- ROS 2 Jazzy 与 `colcon`。
+- 机器人平台环境：默认 `/home/nvidia/xos/setup.bash`，提供自定义语音消息和服务。
+- 底盘 SDK：默认 `/home/nvidia/robot_controller/src`，可通过 `ROBOT_CONTROLLER_SRC` 环境变量指定。
+- Python 依赖：`faster-whisper`、`numpy`、`PyYAML`；工作台另需 `psutil`、OpenCV。
+- 机器人已有地图、POI、头部深度相机及音频话题；底盘 REST 默认地址为 `192.168.11.10:9090`。
+- 本地识别模型文件，以及用于模糊意图与问答的可达模型服务。
+
+`small` 为默认识别模型，使用 CPU / int8。配置其他模型加载失败时会尝试回退到 `small`；首次使用需准备缓存或保证模型下载可用。
+
+### 2. 获取并构建
+
+首次部署时，在机器人上执行：
 
 ```bash
-cd /home/nvidia/guide_robot/learn/visitor_wayfinding_robot
+git clone https://github.com/cisyam555/visitor_wayfinding_robot.git
+cd visitor_wayfinding_robot
 source /opt/ros/jazzy/setup.bash
 source /home/nvidia/xos/setup.bash
 colcon build --packages-select learn3_d --symlink-install
 source install/setup.bash
+```
+
+现有机器人部署目录为 `/home/nvidia/guide_robot/learn/visitor_wayfinding_robot`。更新已有部署时，在该目录更新代码并构建即可，无需重复克隆。
+
+### 3. 启动带路节点
+
+```bash
 ros2 launch learn3_d tour.launch.py
 ```
 
-启动后默认进入待命交互。请只运行一个控制底盘的项目。
+默认使用 `消防` 地图、`乐知教育` 待命点，启动后等待访客交互。现场点位名称必须与配置一致。启动前确认没有其他导航项目同时控制底盘；本项目会拒绝重复实例，并提示已发现的其他导航进程。
 
-## 常用配置
+### 4. 验证交互
+
+先在可控场地测试“你好”，再测试“带我去创想谷”“停一下”“继续”和“回去吧”。没有麦克风输入时，也可在已加载同样 ROS 环境的终端发送文本：
+
+```bash
+# 对话输入，不指定运动目的地
+ros2 topic pub --once /tour/chat std_msgs/msg/String "{data: '你好'}"
+```
+
+确认识别、播报、地图与停车行为后，再测试完整送客和回程流程。
+
+## 地点与参数配置
+
+### 地点配置
+
+编辑 [places.yaml](src/learn3_d/config/places.yaml)。默认提供乐知教育、核心力量跑酷、创想谷、厕所和跆拳道馆。
+
+```yaml
+standby: 乐知教育
+aliases:
+  乐知教育: 乐知教育
+  创想谷: 创想谷
+  厕所: 厕所
+  卫生间: 厕所
+main_line:
+  - 乐知教育
+  - 创想谷
+  - 厕所
+```
+
+上方为字段示例，实际配置还包含其他点位与中转点。别名映射到的 POI 必须存在于底盘地图中；主线按物理顺序填写。点位改名时同步检查节点中的到点转向配置。
+
+### 常用启动参数
 
 | 参数 | 默认值 | 用途 |
 | --- | --- | --- |
-| `map` | `消防` | 底盘地图名 |
-| `reloc_poi` | `乐知教育` | 待命及重定位参考点 |
-| `nav_direct` | `true` | 直接前往目标；false 按主线逐段走 |
-| `track` | 空 | 空表示点对点；指定名称才使用录制轨道 |
-| `await_timeout` | `35.0` | 送达后自动回程等待秒数，0 关闭 |
-| `pause_timeout` | `35.0` | 被叫停后自动回程等待秒数，0 关闭 |
-| `enable_voice` | `true` | 是否播报 |
-| `enable_nav` | `true` | 是否启用导航 |
-| `enable_presence` | `true` | 靠近检测与问候 |
-| `qwen_base_url` / `qwen_model` | 见 launch | 模型服务与模型名称 |
-| `asr_model` | `small` | 本地识别模型，需预先准备模型文件或允许下载 |
-| `asr_beam_size` | `3` | 识别搜索宽度，增大通常也会增加耗时 |
-| `vad_threshold` | `300.0` | 语音能量阈值，嘈杂环境可调大 |
-| `vad_silence_s` | `0.4` | 判定一句话结束的静音秒数 |
+| `map` | `消防` | 底盘地图 |
+| `reloc_poi` | `乐知教育` | 待命与重定位参考点 |
+| `nav_direct` | `true` | 直接导航；false 按主线逐段走 |
+| `track` | 空 | 空表示点对点，指定名称才使用录制轨道 |
+| `await_timeout` | `35.0` | 送达后的自动回程等待秒数 |
+| `pause_timeout` | `35.0` | 叫停后的自动回程等待秒数 |
+| `enable_nav` | `true` | 是否连接底盘导航 |
+| `enable_voice` | `true` | 是否启用播报 |
+| `enable_presence` | `true` | 是否靠近问候 |
+| `asr_model` | `small` | 本地识别模型 |
+| `asr_beam_size` | `3` | 识别搜索宽度 |
+| `vad_threshold` | `300.0` | 语音能量阈值 |
+| `vad_silence_s` | `0.4` | 断句静音时间，秒 |
 
 ```bash
-# 指定地图及待命点
+# 指定地图和待命点
 ros2 launch learn3_d tour.launch.py map:=消防 reloc_poi:=乐知教育
 
-# 关闭两种超时自动回程
+# 关闭送达及叫停后的超时自动回程
 ros2 launch learn3_d tour.launch.py await_timeout:=0 pause_timeout:=0
 
 # 只测试对话，不启用导航
 ros2 launch learn3_d tour.launch.py enable_nav:=false
 
-# 调整本地语音识别与断句
-ros2 launch learn3_d tour.launch.py asr_model:=small asr_beam_size:=3 vad_threshold:=300.0 vad_silence_s:=0.4
+# 调整识别与断句参数
+ros2 launch learn3_d tour.launch.py \
+  asr_model:=small asr_beam_size:=3 \
+  vad_threshold:=300.0 vad_silence_s:=0.4
 ```
 
-地点与别名修改 `src/learn3_d/config/places.yaml`，点位名必须与底盘一致。默认地点为乐知教育、核心力量跑酷、创想谷、厕所和跆拳道馆。新增地点还需核对主线、支线和到点转向配置。
+模型地址、模型名和请求超时通过 `qwen_base_url`、`qwen_model`、`qwen_timeout` 配置。完整 launch 参数见 [tour.launch.py](src/learn3_d/launch/tour.launch.py)；其他节点参数见 [tour_chat.py](src/learn3_d/learn3_d/tour_chat.py)。修改配置后重新构建并重启对应节点。
 
-更多 ROS 参数在 `tour_chat.py` 中声明，可使用 `ros2 run learn3_d tour_chat --ros-args -p 参数:=值` 覆盖。修改安装配置或入口后重新构建并重启节点。
+## 网页工作台
 
-## 网页启动
+![小静带路工作台实机截图](docs/images/web-dashboard.jpg)
+
+截图来自连接机器人后的工作台，展示相机画面、设备数据与当时的任务信息。
+
+**[打开实时工作台（机器人局域网）](http://192.168.21.19:8765/)** · [工作台启动与使用文档](web/README.md)
+
+在机器人项目目录另开终端运行：
 
 ```bash
-cd /home/nvidia/guide_robot/learn/visitor_wayfinding_robot
 bash web/start_monitor.sh --port 8765
 ```
 
-浏览器访问 `http://<机器人IP>:8765/`。监测服务独立运行；启动节点、停止本页启动的节点、导航和文本指令均由页面确认后提交。运行示意图用于展示沿线位置，不是精确地图。
+电脑与机器人须处于可互通的局域网，浏览器访问 `http://<机器人IP>:8765/`；IP 变化后请更换地址。GitHub 首页提供文档、截图与视频，实时数据由机器人上的监测服务提供。
+
+- **总览**：相机、任务状态、事件流与指令入口。
+- **设备状态**：CPU、温度、内存、电量及 ROS 设备发现情况。
+- **地图配置**：地点列表和沿线运行示意；示意位置不等同于精确地图。
+- **确认操作**：启动节点、停止本页启动的节点、地点导航与文本指令。
+
+监测进程与导航节点独立。只打开监测页面不会自动启动带路任务。
 
 ## 代码入口
 
-点击文件名可查看源码。建议先看启动文件，再看主节点，最后看导航与语音模块。
+建议从启动文件开始，依次阅读主节点、导航核心和语音模块。文件名均可点击。
 
-- [tour.launch.py](src/learn3_d/launch/tour.launch.py)：启动入口，配置地图、回程等待时间和语音参数。
-- [tour_chat.py](src/learn3_d/learn3_d/tour_chat.py)：主节点，处理意图、交互状态、播报和自动回程。
-- [nav_core.py](src/learn3_d/learn3_d/nav_core.py)：底盘导航，处理任务下发与取消、定位恢复、到点校验和转身。
-- [mic_asr.py](src/learn3_d/learn3_d/mic_asr.py)：麦克风音频、语音断句与本地识别。
+- [tour.launch.py](src/learn3_d/launch/tour.launch.py)：启动参数与节点配置。
+- [tour_chat.py](src/learn3_d/learn3_d/tour_chat.py)：意图处理、交互状态、播报和自动回程。
+- [nav_core.py](src/learn3_d/learn3_d/nav_core.py)：导航任务、取消、定位恢复、到点与转向。
+- [nav_route.py](src/learn3_d/learn3_d/nav_route.py)：路线导航入口与复用封装。
+- [mic_asr.py](src/learn3_d/learn3_d/mic_asr.py)：音频接入、VAD 与本地语音识别。
 - [front_guard.py](src/learn3_d/learn3_d/front_guard.py)：前向深度检测。
-- [places.yaml](src/learn3_d/config/places.yaml)：地点、别名和主线配置。
-- [web 目录](web/)：网页工作台、监测服务及测试。
+- [places.py](src/learn3_d/learn3_d/places.py)：地点、别名与路线解析。
+- [qwen.py](src/learn3_d/learn3_d/qwen.py)：模型接口客户端。
+- [places.yaml](src/learn3_d/config/places.yaml)：现场地点配置。
+- [web 目录](web/)：工作台前后端及离线测试。
 
-## 排障与运行边界
+## 测试与排障
 
-- 无语音输入：检查麦克风话题、ASR 和平台服务；日志按 `~/guide_logs/tour_chat_visitor_YYYYMMDD.log` 单独保存。
-- 不导航或导航失败：核对地图、POI、定位置信度、底盘故障和是否存在其他导航进程。
-- 播报失败：检查平台 TTS 与网络；平台“音频生成失败”提示音会被过滤，避免成为用户输入。
-- 模型不可达：使用降级话术；不将未校验的模型输出直接当成导航目标。
-- 深度检测仅覆盖相机可见区域；定位恢复、转身与取消效果需要在现场验证。
-- 网页面向可信局域网；显示在线或电量正常并不代表已具备出发条件。
+### 离线检查
 
-网页离线测试：`cd web && python3 -m unittest test_monitor -v`。硬件导航和语音效果需在机器人上另行验证。
+在具备工作台 Python 依赖及 Node.js 的开发环境中执行：
+
+```bash
+cd web
+python3 -m unittest test_monitor -v
+node --check live.js
+```
+
+现有工作台测试覆盖操作确认、地点白名单、节点运行前置条件、文件访问限制、过期图像和状态数据处理。它们不启动机器人，不能替代实机导航、语音及停车测试。
+
+### 常见问题
+
+- **网页打不开**：确认监测服务运行、IP 和端口正确、网络互通。打开 GitHub 的 `web/README.md` 看到的是使用文档。
+- **语音无反应**：检查音频话题、ASR、模型加载及平台服务；降低 VAD 阈值会增加灵敏度，也可能引入噪声。
+- **能对话但不走**：检查 `enable_nav`、地点匹配、底盘健康、定位状态及其他导航进程。
+- **播报无声音**：检查 TTS 服务和网络；平台“音频生成失败”提示音会被过滤，避免变成用户指令。
+- **模型不可达**：检查模型地址与超时。模型请求失败使用降级回复，不将未校验的地点用于导航。
+- **回程失败**：查看定位、障碍与底盘任务状态；必要时由现场人员处理。
+
+对话与任务日志默认保存为 `~/guide_logs/tour_chat_visitor_YYYYMMDD.log`。
+
+## 运行边界
+
+- 深度相机仅覆盖可见区域；软件叫停、防撞和定位恢复都需要现场验证。
+- 自动回程依赖可用地图、定位与底盘，不等于异常情况下保证返回。
+- Web 工作台面向可信局域网；设备在线和电量正常不代表已经满足出发条件。
+- 本项目复用平台全局 TTS 音色，多个语音或导航项目并行运行可能造成冲突。
+
+## 参与改进
+
+欢迎通过 [Issues](https://github.com/cisyam555/visitor_wayfinding_robot/issues) 反馈问题，附上复现步骤、相关参数和已脱敏日志。提交改动时使用 `feat:`、`fix:`、`docs:` 等清晰的提交类型；涉及导航、识别或取消逻辑的改动，请说明实机验证情况。
+
+## 许可证
+
+项目软件包采用 [Apache License 2.0](src/learn3_d/LICENSE)。外部底盘 SDK、机器人平台、模型及其他依赖遵循各自的许可证与使用条件。
