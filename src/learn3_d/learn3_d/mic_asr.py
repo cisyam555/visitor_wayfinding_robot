@@ -218,17 +218,24 @@ class MicAsr:
 
     # -------------------------------------------------------------------- 识别
     def _load_model(self) -> None:
-        try:
-            from faster_whisper import WhisperModel
-            started = time.monotonic()
-            self._model = WhisperModel(
-                self._model_name, device="cpu", compute_type=self._compute_type)
-            self._log.info(
-                f"语音识别模型 {self._model_name} 已加载，"
-                f"用时 {time.monotonic() - started:.1f}s")
-        except Exception as exc:  # noqa: BLE001 - 模型不可用时只停用麦克风识别
-            self._model_failed = True
-            self._log.error(f"加载语音识别模型失败：{exc}")
+        # 配置的模型没下载好时退回已缓存的 small，别让麦克风识别整体失效
+        names = [self._model_name]
+        if self._model_name != "small":
+            names.append("small")
+        for name in names:
+            try:
+                from faster_whisper import WhisperModel
+                started = time.monotonic()
+                model = WhisperModel(
+                    name, device="cpu", compute_type=self._compute_type)
+                self._model = model
+                self._log.info(
+                    f"语音识别模型 {name} 已加载，"
+                    f"用时 {time.monotonic() - started:.1f}s")
+                return
+            except Exception as exc:  # noqa: BLE001 - 模型不可用时退回小模型
+                self._log.error(f"加载语音识别模型 {name} 失败：{exc}")
+        self._model_failed = True
 
     def _emit(self, audio: np.ndarray) -> None:
         if self._model is None:

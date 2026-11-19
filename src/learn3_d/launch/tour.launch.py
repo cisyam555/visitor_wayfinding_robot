@@ -53,6 +53,14 @@ def generate_launch_description():
                               description='模型名'),
         DeclareLaunchArgument('qwen_timeout', default_value='30.0',
                               description='模型请求超时（秒）'),
+        DeclareLaunchArgument('asr_model', default_value='small',
+                              description='本地识别模型：small 更快，medium 更准（需先下载）'),
+        DeclareLaunchArgument('asr_beam_size', default_value='3',
+                              description='识别 beam，越大越准越慢'),
+        DeclareLaunchArgument('vad_threshold', default_value='300.0',
+                              description='能量 VAD 阈值，越小越灵敏（嘈杂环境调大）'),
+        DeclareLaunchArgument('vad_silence_s', default_value='0.4',
+                              description='多久没声音算一句话结束（秒）'),
     ]
 
     tour_chat = Node(
@@ -87,6 +95,13 @@ def generate_launch_description():
             'qwen_model': LaunchConfiguration('qwen_model'),
             'qwen_timeout': ParameterValue(
                 LaunchConfiguration('qwen_timeout'), value_type=float),
+            'asr_model': LaunchConfiguration('asr_model'),
+            'asr_beam_size': ParameterValue(
+                LaunchConfiguration('asr_beam_size'), value_type=int),
+            'vad_threshold': ParameterValue(
+                LaunchConfiguration('vad_threshold'), value_type=float),
+            'vad_silence_s': ParameterValue(
+                LaunchConfiguration('vad_silence_s'), value_type=float),
         }],
     )
 

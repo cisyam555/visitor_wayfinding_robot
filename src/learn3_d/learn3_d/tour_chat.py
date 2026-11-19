@@ -385,18 +385,19 @@ class TourChat(Node):
         self.declare_parameter("mic_topic", "/lyre/audio_stream")
         self.declare_parameter("mic_control_service", "/lyre/audio_control")
         self.declare_parameter("mic_rate_in", 96000)
-        self.declare_parameter("vad_threshold", 600.0)
-        self.declare_parameter("vad_silence_s", 0.55)
+        self.declare_parameter("vad_threshold", 300.0)
+        self.declare_parameter("vad_silence_s", 0.4)
         self.declare_parameter("asr_model", "small")
         self.declare_parameter("asr_compute_type", "int8")
         self.declare_parameter("asr_language", "zh")
-        self.declare_parameter("asr_beam_size", 1)
+        self.declare_parameter("asr_beam_size", 3)
         self.declare_parameter("asr_max_speech", 6.0)
         self.declare_parameter(
             "asr_hotwords",
-            "乐知教育、核心力量跑酷、创想谷、厕所、洗手间、卫生间、"
+            "乐知教育、核心力量跑酷、创想谷、厕所、洗手间、卫生间、上厕所、"
             "跆拳道馆、带我去、我想去、回到、跑酷、乐知、创想、跆拳道、"
-            "停一下、停下来、停下、别动、不要动、站住、等一下、回去")
+            "停一下、停下来、停下、别动、别走、不要动、站住、等一下、等一等、"
+            "继续走、不用了、回去")
         self.declare_parameter(
             "asr_initial_prompt",
             "以下是普通话展厅导览对话。常见指令：带我去创想谷、我要去厕所、"
@@ -745,10 +746,19 @@ class TourChat(Node):
             return
         # 喇叭声音被自己麦克风收回来时，不能当成用户指令。
         # 用最近 25 秒的播报历史比对：识别有延迟，只听最后一句会漏掉回声。
+        # 但 ASR 常把喇叭尾音和用户紧跟着说的指令粘成一句
+        # （「好的，已经停下了，您说。带我去厕所。」），整句丢掉会把真指令
+        # 一起吞掉，所以先剥掉自己那段，剩下还有内容就继续处理。
         if self._is_recent_echo(text):
-            self.get_logger().info(f"忽略自己的播报回声：{text}")
-            self._file_log("忽略(回声)", text)
-            return
+            cleaned = self._strip_echo(text)
+            if (not _meaningful(cleaned, max(2, self._min_chars))
+                    or self._is_recent_echo(cleaned)):
+                self.get_logger().info(f"忽略自己的播报回声：{text}")
+                self._file_log("忽略(回声)", text)
+                return
+            self.get_logger().info(f"剥离播报回声后继续处理：{text} -> {cleaned}")
+            self._file_log("剥离回声", cleaned)
+            text = cleaned
         # 「带我去」和「创想谷」被 VAD 切成两句时，先等下一句拼起来
         text = self._merge_prefix(text)
         if not text:
@@ -1545,6 +1555,33 @@ class TourChat(Node):
     def _hold_mic(self, muted: bool) -> None:
         if self._mic is not None:
             self._mic.hold(muted)
+
+    def _strip_echo(self, text: str) -> str:
+        """剥掉识别结果里混进来的自己的播报，返回剩下真正说的话。
+
+        识别结果往往是「自己的尾音 + 用户紧跟着说的指令」，这里按最近
+        25 秒的播报逐句找出重叠最长的一段删掉，剩下的才是用户指令。
+        """
+        plain = _plain(text)
+        now = time.monotonic()
+        said_lines = [said for stamp, said in tuple(self._spoken_history)
+                      if now - stamp <= 25.0]
+        if self._last_spoken:
+            said_lines.append(self._last_spoken)
+        for said in said_lines:
+            said_plain = _plain(said)
+            # 只剩自己的原话就没什么可剥的，交给外层按回声丢弃
+            if len(said_plain) < 4 or len(plain) <= len(said_plain):
+                continue
+            match = difflib.SequenceMatcher(
+                None, plain, said_plain).find_longest_match(
+                    0, len(plain), 0, len(said_plain))
+            # 重叠太短说明只是偶合，不能误删用户说的话
+            if match.size < 4 or match.size < len(said_plain) * 0.6:
+                continue
+            plain = (plain[:match.a] + plain[match.a + match.size:]).strip(
+                "了吧啊呀哦嘛")
+        return plain
 
     def _is_recent_echo(self, text: str) -> bool:
         """识别延迟可能有好几秒，按最近 25 秒的播报历史判断回声。"""
